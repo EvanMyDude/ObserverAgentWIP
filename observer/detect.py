@@ -68,7 +68,7 @@ def _rule_for(tool_name: str, tool_input) -> str:
 
 def _error_fingerprint(call: sqlite3.Row, tool_input: dict) -> str:
     cls = call["error_class"]
-    tool = call["tool_name"]
+    tool = classify.canonical_tool(call["tool_name"])
     if cls == "command_not_found":
         prog = classify.missing_program(call["result_excerpt"] or "") or classify.first_program(tool_input.get("command", ""))
         return "missing:%s" % prog

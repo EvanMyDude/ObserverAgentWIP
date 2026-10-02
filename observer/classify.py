@@ -83,6 +83,29 @@ _CORRECTION_RE = re.compile(
 )
 
 
+# MCP servers built into the Claude apps (from the 2.1.287 CLI). Cowork runs its shell and web fetch through
+# `workspace`; errors from these servers are not a user connector's auth or configuration problem.
+BUILTIN_MCP_SERVERS = {
+    "workspace", "terminal", "office", "visualize", "window_halo", "dev_debug", "ccd_session", "ccd_session_mgmt",
+    "claude_in_chrome", "claude_browser", "claude_preview", "claude_code_ios_simulator",
+    "claude_code_android_emulator", "computer_use", "framebuffer", "plugins", "skills", "mcp_registry",
+    "scheduled_tasks", "cowork", "session_info", "dispatch", "remote_devices", "ccd_directory",
+}
+_CANONICAL_TOOLS = {"bash": "Bash", "web_fetch": "WebFetch"}
+
+
+def mcp_server(tool_name: str) -> str:
+    parts = (tool_name or "").split("__")
+    return parts[1] if len(parts) >= 3 and parts[0] == "mcp" else ""
+
+
+def canonical_tool(tool_name: str) -> str:
+    """`mcp__workspace__bash` is Cowork's shell: classify it exactly like Claude Code's Bash."""
+    if mcp_server(tool_name) in BUILTIN_MCP_SERVERS:
+        return _CANONICAL_TOOLS.get(tool_name.split("__")[-1].lower(), tool_name)
+    return tool_name
+
+
 def result_text(content) -> str:
     """Flatten tool_result content (string or list of blocks) to text."""
     if content is None:
@@ -108,6 +131,7 @@ def classify_result(tool_name: str, tool_input, text: str, is_error) -> tuple:
 
     outcome is ok | error | rejected | denied; error_class is None for ok/rejected/denied.
     """
+    tool_name = canonical_tool(tool_name)
     text = text or ""
     head = text.lstrip()[:400]
     # Anchor at the start: tool output that merely quotes these phrases (a grep, a log) is not a rejection.
@@ -136,7 +160,8 @@ def classify_result(tool_name: str, tool_input, text: str, is_error) -> tuple:
             return "error", "no_match"
         return "error", "nonzero_exit"
     if tool_name.startswith("mcp__"):
-        return "error", "mcp_error"
+        # A built-in app tool failing usually reflects how it was called, not a broken connector.
+        return "error", "app_tool_error" if mcp_server(tool_name) in BUILTIN_MCP_SERVERS else "mcp_error"
     return "error", "other"
 
 
@@ -567,6 +592,7 @@ def rule_risk(rule: str) -> tuple:
 
 def synth_rule(tool_name: str, tool_input) -> str | None:
     """Narrowest reasonable allow rule for a tool call, or None when no safe rule exists."""
+    tool_name = canonical_tool(tool_name)
     tool_input = tool_input if isinstance(tool_input, dict) else {}
     if tool_name == "Bash":
         command = str(tool_input.get("command", ""))

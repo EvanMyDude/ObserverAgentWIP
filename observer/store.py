@@ -6,10 +6,11 @@ import os
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 # Statements that bring a database from version N-1 to N. Fresh databases get SCHEMA directly.
 MIGRATIONS = {
     2: ["ALTER TABLE sessions ADD COLUMN surface TEXT"],
+    3: ["CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)"],
 }
 
 SCHEMA = """
@@ -125,6 +126,10 @@ CREATE TABLE IF NOT EXISTS recommendations (
     after_per_day REAL,
     dismissed_at TEXT,
     dismissed_evidence INTEGER
+);
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
 );
 CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

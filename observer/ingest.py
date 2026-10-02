@@ -33,9 +33,11 @@ _NON_HUMAN_PREFIXES = (
     "<bash-stdout>",
     "<bash-stderr>",
 )
-# Record types that carry no friction signal. The last six appeared in Claude Code 2.1.28x.
+# Record types that carry no friction signal. "mode" onward appeared in Claude Code 2.1.28x and Cowork.
 _METADATA_TYPES = {"attachment", "queue-operation", "last-prompt", "summary", "file-history-snapshot", "atis-latch",
-                   "mode", "bridge-session", "permission-mode", "ai-title", "agent-name", "cost-state"}
+                   "mode", "bridge-session", "permission-mode", "ai-title", "agent-name", "cost-state", "progress"}
+# Bump when classify_result changes so error rows already in the database are relabelled.
+CLASSIFIER_VERSION = 2
 EXCERPT_CHARS = 1200
 TEXT_CHARS = 2000
 
@@ -319,6 +321,31 @@ class TranscriptIngestor:
         if stripped.startswith(_NON_HUMAN_PREFIXES):
             return
         self._message(uuid, session_id, agent_id, ts, "human", None, excerpt(stripped, TEXT_CHARS))
+
+
+def reclassify(conn: sqlite3.Connection) -> int:
+    """Relabel stored errors with the current classifier. Works from the stored excerpt, which keeps the
+    first 1,200 characters of each failed result: enough for every pattern the classifier uses."""
+    row = conn.execute("SELECT value FROM meta WHERE key='classifier_version'").fetchone()
+    if row is not None and row["value"] == str(CLASSIFIER_VERSION):
+        return 0
+    changed = 0
+    for call in conn.execute(
+        "SELECT tool_use_id, tool_name, input_json, result_excerpt, outcome, error_class FROM tool_calls "
+        "WHERE outcome IN ('error', 'denied')"
+    ).fetchall():
+        try:
+            tool_input = json.loads(call["input_json"]) if call["input_json"] else {}
+        except ValueError:
+            tool_input = {}
+        outcome, error_class = classify.classify_result(call["tool_name"], tool_input, call["result_excerpt"] or "", True)
+        if (outcome, error_class) != (call["outcome"], call["error_class"]):
+            conn.execute("UPDATE tool_calls SET outcome=?, error_class=? WHERE tool_use_id=?",
+                         (outcome, error_class, call["tool_use_id"]))
+            changed += 1
+    conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('classifier_version', ?)", (str(CLASSIFIER_VERSION),))
+    conn.commit()
+    return changed
 
 
 def ingest_spool(conn: sqlite3.Connection, cfg: Config) -> Counter:

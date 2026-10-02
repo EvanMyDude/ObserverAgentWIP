@@ -112,6 +112,17 @@ class PipelineTest(unittest.TestCase):
         report = (self.cfg.reports_dir / "latest.md").read_text()
         self.assertIn("## Applied changes", report)
 
+    def test_recommendations_expire_when_evidence_ages_out(self):
+        self.run_pipeline()
+        rec = self.find("install_tool", "frobctl")
+        self.assertEqual(rec["status"], "open")
+        self.run_pipeline(days_later=30)  # every fixture event is now outside the 14-day window
+        rec = self.find("install_tool", "frobctl")
+        self.assertEqual(rec["status"], "expired")
+        conn = connect(self.cfg.db_path)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM recommendations WHERE status='open'").fetchone()[0], 0)
+        conn.close()
+
     def test_dismissed_stays_dismissed_until_evidence_doubles(self):
         self.run_pipeline()
         rec = self.find("install_tool", "frobctl")
@@ -202,8 +213,21 @@ class MigrationTest(unittest.TestCase):
         self.assertIn("surface", [r[1] for r in conn.execute("PRAGMA table_info(sessions)")])
         self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], store.SCHEMA_VERSION)
         self.assertEqual(conn.execute("SELECT cwd FROM sessions").fetchone()[0], "/x")
+        self.assertIsNotNone(conn.execute("SELECT name FROM sqlite_master WHERE name='meta'").fetchone())
         conn.close()
         self.assertEqual(store.connect(path).execute("PRAGMA user_version").fetchone()[0], store.SCHEMA_VERSION)
+
+    def test_stored_errors_are_relabelled_once_when_the_classifier_changes(self):
+        from observer import ingest, store
+        conn = store.connect(Path(tempfile.mkdtemp()) / "observer.db")
+        conn.execute("INSERT INTO tool_calls(tool_use_id, session_id, ts, tool_name, input_json, outcome, error_class, "
+                     "result_excerpt) VALUES('t1', 's1', '2026-10-01T00:00:00.000Z', 'mcp__workspace__bash', "
+                     "'{\"command\": \"python3 x.py\"}', 'error', 'mcp_error', 'Exit code 1\nTraceback')")
+        conn.commit()
+        self.assertEqual(ingest.reclassify(conn), 1)
+        self.assertEqual(conn.execute("SELECT error_class FROM tool_calls").fetchone()[0], "nonzero_exit")
+        self.assertEqual(ingest.reclassify(conn), 0)  # recorded version matches; no second pass
+        conn.close()
 
 
 class OutsideWorkdirFingerprintTest(unittest.TestCase):

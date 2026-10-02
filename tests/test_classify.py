@@ -122,6 +122,19 @@ class ResultTest(unittest.TestCase):
             with self.subTest(rule=rule):
                 self.assertEqual(c.rule_risk(rule)[0], "low")
 
+    def test_cowork_workspace_tools_are_classified_as_builtins(self):
+        # From the first real run: Cowork's shell is mcp__workspace__bash, and its script failures were reported
+        # as "check your MCP server".
+        script = {"command": "cd /sessions/x && python3 build.py"}
+        self.assertEqual(c.classify_result("mcp__workspace__bash", script, "Exit code 1\nTraceback ...", True),
+                         ("error", "nonzero_exit"))
+        self.assertEqual(c.classify_result("mcp__workspace__bash", {"command": "jq . x"},
+                                           "Exit code 127\nbash: jq: command not found", True),
+                         ("error", "command_not_found"))
+        self.assertEqual(c.classify_result("mcp__office__create_doc", {}, "failed", True), ("error", "app_tool_error"))
+        self.assertEqual(c.classify_result("mcp__notion__search", {}, "failed", True), ("error", "mcp_error"))
+        self.assertEqual(c.synth_rule("mcp__workspace__bash", {"command": "git status"}), "Bash(git status *)")
+
     def test_benign_failures(self):
         self.assertEqual(c.classify_result("Bash", {"command": "grep foo x"}, "Exit code 1", True), ("error", "no_match"))
         self.assertEqual(c.classify_result("Bash", {"command": "pytest -q"}, "Exit code 1\nFAILED test_x", True),

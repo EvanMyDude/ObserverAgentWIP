@@ -9,7 +9,7 @@ from collections import Counter
 from . import judge, outcomes, policy, recommend, report
 from .config import Config, ensure_home
 from .detect import detect, iso
-from .ingest import TranscriptIngestor, ingest_spool
+from .ingest import TranscriptIngestor, ingest_spool, reclassify
 from .install import hooks_installed
 from .store import connect, dumps, loads
 
@@ -44,8 +44,10 @@ def run(cfg: Config, use_judge: bool = True, send_notification: bool = False, no
     ).fetchone()
     since = previous["window_end"] if previous else iso(now - datetime.timedelta(days=1))
 
+    relabelled = reclassify(conn)
     ingestor = TranscriptIngestor(conn, cfg)
     ingest_stats = ingestor.run()
+    ingest_stats["relabelled"] = relabelled
     spool_stats = ingest_spool(conn, cfg)
     prune(conn, cfg, now)
     new_sessions = conn.execute("SELECT COUNT(*) FROM sessions WHERE internal=0 AND first_ts >= ?", (since,)).fetchone()[0]
@@ -87,7 +89,8 @@ def run(cfg: Config, use_judge: bool = True, send_notification: bool = False, no
     for rec in recs:
         policy.gate(rec)
     outcomes.upsert(conn, recs, now_iso)
-    outcome_changes = outcomes.update_outcomes(conn, cfg, now)
+    outcome_changes = outcomes.update_outcomes(conn, cfg, now)  # before expiry, so applied changes are caught
+    outcomes.expire_unseen(conn, now_iso)
 
     seen_ids = [r.id for r in recs]
     placeholders = ",".join("?" * len(seen_ids)) or "''"

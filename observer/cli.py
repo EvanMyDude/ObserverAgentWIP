@@ -26,7 +26,7 @@ def cmd_run(cfg, args) -> int:
 
 def cmd_list(cfg, args) -> int:
     conn = _conn(cfg)
-    statuses = ("open", "blocked", "applied", "verified", "not_effective", "dismissed") if args.all else ("open",)
+    statuses = ("open", "blocked", "applied", "verified", "not_effective", "dismissed", "expired") if args.all else ("open",)
     rows = conn.execute(
         "SELECT * FROM recommendations WHERE status IN (%s)" % ",".join("?" * len(statuses)), statuses).fetchall()
     rows = sorted(rows, key=rank_score, reverse=True)

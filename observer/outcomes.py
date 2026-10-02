@@ -15,6 +15,16 @@ from .store import dumps, loads
 
 
 
+def expire_unseen(conn: sqlite3.Connection, now_iso: str) -> int:
+    """Open or blocked recommendations this run did not regenerate no longer have qualifying evidence."""
+    cur = conn.execute(
+        "UPDATE recommendations SET status='expired', status_reason='evidence no longer meets the thresholds' "
+        "WHERE status IN ('open', 'blocked') AND last_seen < ?", (now_iso,)
+    )
+    conn.commit()
+    return cur.rowcount
+
+
 def upsert(conn: sqlite3.Connection, recs: list, now_iso: str) -> None:
     for rec in recs:
         row = conn.execute("SELECT * FROM recommendations WHERE id=?", (rec.id,)).fetchone()
@@ -35,7 +45,7 @@ def upsert(conn: sqlite3.Connection, recs: list, now_iso: str) -> None:
         if rec.blocked_reason:
             if status in ("open", "blocked"):
                 status, reason = "blocked", rec.blocked_reason
-        elif status == "blocked":
+        elif status in ("blocked", "expired"):
             status, reason = "open", None
         elif status == "dismissed" and rec.evidence.get("count", 0) >= 2 * max(row["dismissed_evidence"] or 0, 1):
             status, reason = "open", "reopened: evidence doubled since you dismissed it"
