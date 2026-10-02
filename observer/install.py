@@ -224,15 +224,16 @@ def uninstall_schedule() -> int:
 def doctor(cfg: Config) -> int:
     ok = True
 
-    def line(good: bool, text: str):
+    def line(good: bool, text: str, required: bool = False):
+        # Only blockers fail the check; missing hooks or schedule are expected before `make install`.
         nonlocal ok
-        ok = ok and good
-        print("%s %s" % ("[ok]  " if good else "[warn]", text))
+        ok = ok and (good or not required)
+        print("%s %s" % ("[ok]  " if good else ("[fail]" if required else "[warn]"), text))
 
-    line(sys.version_info >= (3, 9), "Python %s at %s" % (sys.version.split()[0], sys.executable))
+    line(sys.version_info >= (3, 9), "Python %s at %s" % (sys.version.split()[0], sys.executable), required=True)
     for root in cfg.roots():
         count = len(list(root.glob("*/*.jsonl"))) if root.is_dir() else 0
-        line(count > 0, "Transcripts: %d session files under %s" % (count, root))
+        line(count > 0, "Transcripts: %d session files under %s" % (count, root), required=True)
     claude = shutil.which(cfg.claude_bin)
     version = ""
     if claude:

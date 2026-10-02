@@ -87,7 +87,7 @@ Everything stays in `~/.observer` with owner-only permissions: `observer.db` (SQ
 ## Development
 
 ```bash
-make test   # 50 tests: classifier, policy gate, pipeline scenario, judge with a fake claude binary, hook, installer
+make test   # 52 tests: classifier, policy gate, pipeline scenario, judge with a fake claude binary, hook, installer
 ```
 
 The test fixtures reproduce record shapes captured from Claude Code 2.1.287 transcripts. `tests/test_judge.py` includes a prompt-injection case in which the judge proposes `Bash(curl *)`; the gate must block it.

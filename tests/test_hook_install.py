@@ -91,6 +91,18 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(install.install_hooks(apply=True), 1)
         self.assertEqual(self.settings.read_text(), "{broken")
 
+    def test_doctor_passes_before_install(self):
+        # Missing hooks and schedule are expected on a first run and must not fail `make doctor`.
+        session = fixtures.Session(Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects", str(self.tmp / "p"))
+        session.prompt("a prompt with enough words")
+        session.write()
+        with mock.patch("sys.stdout"):
+            self.assertEqual(install.doctor(install.Config()), 0)
+
+    def test_doctor_fails_without_transcripts(self):
+        with mock.patch("sys.stdout"):
+            self.assertEqual(install.doctor(install.Config()), 1)
+
     def test_launchd_plist_uses_absolute_paths(self):
         plist = install._launchd_plist(install.Config(), 6, 15)
         self.assertEqual(plist["StartCalendarInterval"], {"Hour": 6, "Minute": 15})
