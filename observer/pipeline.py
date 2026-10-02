@@ -114,7 +114,9 @@ def run(cfg: Config, use_judge: bool = True, send_notification: bool = False, no
         "friction_by_kind": report.friction_by_kind(conn, iso(now - datetime.timedelta(days=cfg.window_days))),
         "attribution_counts": judge.judge_counts(attributions),
         "health": report.health_lines(ingest_stats, spool_stats, hook_total, judge_status, ingestor.unknown_types,
-                                      hooks_installed(), notification_counts),
+                                      hooks_installed(), notification_counts, {
+                                          "sessions": conn.execute("SELECT COUNT(*) FROM sessions WHERE internal=0").fetchone()[0],
+                                          "tool_calls": conn.execute("SELECT COUNT(*) FROM tool_calls").fetchone()[0]}),
     }
     text = report.render(ctx, cfg)
     local_day = now.astimezone().strftime("%Y-%m-%d")

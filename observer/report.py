@@ -158,17 +158,18 @@ def friction_by_kind(conn, start: str) -> dict:
 
 
 def health_lines(ingest_stats: Counter, spool_stats: Counter, hook_total: int, judge_status: str, unknown: Counter,
-                 hooks_installed: bool, notification_counts: Counter) -> list:
+                 hooks_installed: bool, notification_counts: Counter, totals: dict) -> list:
+    # Ingestion is incremental, so "new" counts are zero whenever nothing changed since the last run.
     lines = [
-        "Transcripts: %d files checked (%d Claude Code, %d Cowork), %d read, %d records, %d tool calls, "
-        "%d parse errors, %d record errors." % (
+        "Transcripts: %d files checked (%d Claude Code, %d Cowork); %d changed since the last run, adding %d records "
+        "and %d tool calls (%d parse errors). Database: %d sessions, %d tool calls." % (
             ingest_stats.get("files_seen", 0), ingest_stats.get("files_cli", 0), ingest_stats.get("files_cowork", 0),
             ingest_stats.get("files_read", 0), ingest_stats.get("records", 0), ingest_stats.get("tool_calls", 0),
-            ingest_stats.get("parse_errors", 0), ingest_stats.get("record_errors", 0)),
+            ingest_stats.get("parse_errors", 0), totals.get("sessions", 0), totals.get("tool_calls", 0)),
     ]
     if unknown:
-        lines.append("Record types the parser does not recognize (usually new metadata; a concern only if tool calls "
-                     "drop to zero): %s." % ", ".join("%s %d" % kv for kv in unknown.most_common(5)))
+        lines.append("Record types the parser does not recognize (usually new metadata, and harmless while tool calls "
+                     "keep being added): %s." % ", ".join("%s %d" % kv for kv in unknown.most_common(5)))
     if hooks_installed or hook_total:
         lines.append("Hooks: %d new events this run, %d in the database." % (spool_stats.get("hook_events", 0), hook_total))
         if notification_counts:

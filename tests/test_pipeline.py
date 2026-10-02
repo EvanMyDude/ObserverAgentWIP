@@ -141,6 +141,10 @@ class PipelineTest(unittest.TestCase):
         self.assertIn("underperforming", report)
         self.assertNotIn("Hooks are not installed", report)  # hook events exist, so analytics are on
         self.assertEqual((self.cfg.reports_dir / "latest.md").read_text(), report)
+        # A second run with no new activity reads nothing new but still reports the database totals.
+        report = Path(self.run_pipeline()["report"]).read_text()
+        self.assertIn("0 changed since the last run", report)
+        self.assertRegex(report, r"Database: [1-9]\d* sessions, [1-9]\d* tool calls")
 
 
 COWORK_ROOT = "Library/Application Support/Claude/local-agent-mode-sessions/acct/org/local_%s/.claude/projects"
