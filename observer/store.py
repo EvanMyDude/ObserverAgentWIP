@@ -6,7 +6,11 @@ import os
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+# Statements that bring a database from version N-1 to N. Fresh databases get SCHEMA directly.
+MIGRATIONS = {
+    2: ["ALTER TABLE sessions ADD COLUMN surface TEXT"],
+}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS files (
@@ -23,6 +27,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     version TEXT,
     git_branch TEXT,
     permission_mode TEXT,
+    surface TEXT,                    -- cli | cowork
     first_ts TEXT,
     last_ts TEXT,
     internal INTEGER NOT NULL DEFAULT 0
@@ -144,8 +149,13 @@ def connect(path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version < SCHEMA_VERSION:
+    if version == 0:
         conn.executescript(SCHEMA)
+    else:
+        for step in range(version + 1, SCHEMA_VERSION + 1):
+            for statement in MIGRATIONS.get(step, []):
+                conn.execute(statement)
+    if version < SCHEMA_VERSION:
         conn.execute("PRAGMA user_version=%d" % SCHEMA_VERSION)
         conn.commit()
     return conn

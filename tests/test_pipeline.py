@@ -132,6 +132,80 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual((self.cfg.reports_dir / "latest.md").read_text(), report)
 
 
+COWORK_ROOT = "Library/Application Support/Claude/local-agent-mode-sessions/acct/org/local_%s/.claude/projects"
+
+
+class CoworkTest(unittest.TestCase):
+    """Cowork sessions are read from their own transcript trees, scored separately, and never told to edit ~/.claude."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.env = mock.patch.dict(os.environ, fixtures.isolated_env(self.tmp))
+        self.env.start()
+        self.cfg = Config()
+        self.cfg.judge_enabled = False
+        scenario.build(self.tmp / "proj", Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects", self.cfg.spool_dir)
+        for name in ("a1", "b2"):
+            root = Path(os.environ["HOME"]) / (COWORK_ROOT % name)
+            session = fixtures.Session(root, "/sessions/brave-%s" % name, days_ago=1)
+            session.prompt("summarize the lease files please")
+            # `sh` exists on this machine; Cowork evidence must not turn into a "fix your Mac's PATH" item.
+            session.tool("Bash", {"command": "sh build.sh"}, "Exit code 127\nbash: sh: command not found", is_error=True)
+            session.records.append({"type": "ai-title", "title": "Lease summary", "sessionId": session.session_id})
+            session.write()
+
+    def tearDown(self):
+        self.env.stop()
+
+    def test_cowork_sessions_are_ingested_scored_and_redirected(self):
+        result = pipeline.run(self.cfg, use_judge=False, now=fixtures.NOW)
+        conn = connect(self.cfg.db_path)
+        surfaces = {r["surface"] for r in conn.execute("SELECT surface FROM sessions WHERE cwd LIKE '/sessions/%'")}
+        self.assertEqual(surfaces, {"cowork"})
+        rec = conn.execute("SELECT * FROM recommendations WHERE target='cowork:sh'").fetchone()
+        self.assertIsNotNone(rec)
+        self.assertEqual(rec["type"], "install_tool")
+        self.assertEqual(loads(rec["patch_json"])["kind"], "manual")
+        self.assertTrue(rec["title"].endswith("(Cowork)"))
+        self.assertIsNone(conn.execute("SELECT 1 FROM recommendations WHERE target='path:sh'").fetchone())
+        conn.close()
+        report = Path(result["report"]).read_text()
+        self.assertIn("| cowork/main | 2 | 2 | n/a (few calls) |", report)
+        self.assertNotIn("does not recognize", report)  # ai-title and friends are known metadata now
+        self.assertIn("2 Cowork", report)
+        scorecard = report.split("## Agent scorecard")[1].split("## ")[0]
+        self.assertGreater(scorecard.index("cowork/main"), scorecard.index("agent:Explore"))  # small samples last
+
+    def test_doctor_counts_cowork(self):
+        import contextlib
+        import io
+        from observer import install
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(install.doctor(self.cfg), 0)
+        self.assertIn("Cowork: 2 session files", out.getvalue())
+        self.assertNotIn("local-agent-mode-sessions", out.getvalue())
+
+
+class MigrationTest(unittest.TestCase):
+    def test_version_1_database_gains_surface_column(self):
+        import sqlite3
+        from observer import store
+        path = Path(tempfile.mkdtemp()) / "observer.db"
+        old = sqlite3.connect(str(path))
+        old.executescript(store.SCHEMA.replace("    surface TEXT,                    -- cli | cowork\n", ""))
+        old.execute("PRAGMA user_version=1")
+        old.execute("INSERT INTO sessions(session_id, cwd) VALUES('s1', '/x')")
+        old.commit()
+        old.close()
+        conn = store.connect(path)
+        self.assertIn("surface", [r[1] for r in conn.execute("PRAGMA table_info(sessions)")])
+        self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], store.SCHEMA_VERSION)
+        self.assertEqual(conn.execute("SELECT cwd FROM sessions").fetchone()[0], "/x")
+        conn.close()
+        self.assertEqual(store.connect(path).execute("PRAGMA user_version").fetchone()[0], store.SCHEMA_VERSION)
+
+
 class OutsideWorkdirFingerprintTest(unittest.TestCase):
     def test_bash_paths_come_from_the_error_or_command(self):
         # Review finding: Bash calls have no file_path, so every one was fingerprinted "dir:" and dropped.

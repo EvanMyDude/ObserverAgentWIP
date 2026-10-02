@@ -23,6 +23,7 @@ LOOP_THRESHOLD = 3
 # Frictions that count against an agent in the scorecard. Permission prompts and API failures are
 # excluded because they are not the agent's doing.
 AGENT_FAULT_KINDS = ("tool_error", "rejected", "denied", "retry_loop", "interrupt", "correction", "capability_gap")
+COWORK_PREFIX = "cowork/"
 _STOP_WORDS = {"your", "the", "my", "this", "a", "an", "any", "to", "that", "these", "those", "their", "our"}
 
 
@@ -159,7 +160,7 @@ class Detector:
         self.rows = []
         self.stats = Counter()
         self.sessions = {
-            r["session_id"]: r for r in conn.execute("SELECT session_id, cwd, internal FROM sessions")
+            r["session_id"]: r for r in conn.execute("SELECT session_id, cwd, internal, surface FROM sessions")
         }
         self.skill_timeline = defaultdict(list)  # session_id -> sorted [(ts, agent_key)]
 
@@ -172,6 +173,9 @@ class Detector:
         return bool(row and row["internal"])
 
     def emit(self, fid, ts, session_id, akey, kind, subkind, fingerprint, tool_name, detail, ref, cost, meta=None):
+        row = self.sessions.get(session_id)
+        if row is not None and row["surface"] == "cowork" and not akey.startswith(COWORK_PREFIX):
+            akey = COWORK_PREFIX + akey  # Cowork agents are scored and fixed separately from Claude Code
         self.rows.append((fid, ts, session_id, self.project(session_id), akey, kind, subkind, fingerprint, tool_name,
                           detail, ref, float(cost or 0), dumps(meta) if meta else None))
         self.stats[kind] += 1

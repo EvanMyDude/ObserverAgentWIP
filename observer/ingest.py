@@ -33,6 +33,9 @@ _NON_HUMAN_PREFIXES = (
     "<bash-stdout>",
     "<bash-stderr>",
 )
+# Record types that carry no friction signal. The last six appeared in Claude Code 2.1.28x.
+_METADATA_TYPES = {"attachment", "queue-operation", "last-prompt", "summary", "file-history-snapshot", "atis-latch",
+                   "mode", "bridge-session", "permission-mode", "ai-title", "agent-name", "cost-state"}
 EXCERPT_CHARS = 1200
 TEXT_CHARS = 2000
 
@@ -110,22 +113,23 @@ class TranscriptIngestor:
 
     def transcript_files(self) -> list:
         files = []
-        for root in self.cfg.roots():
+        for root, surface in self.cfg.roots():
             if not root.is_dir():
                 continue
-            files.extend(sorted(root.glob("*/*.jsonl")))
-            files.extend(sorted(root.glob("*/*/subagents/agent-*.jsonl")))
+            found = sorted(root.glob("*/*.jsonl")) + sorted(root.glob("*/*/subagents/agent-*.jsonl"))
+            files.extend((path, surface) for path in found)
+            self.stats["files_%s" % surface] += len(found)
         return files
 
     def run(self) -> Counter:
-        for path in self.transcript_files():
-            self.ingest_file(path)
+        for path, surface in self.transcript_files():
+            self.ingest_file(path, surface)
         self.stats["unknown_record_types"] = sum(self.unknown_types.values())
         return self.stats
 
     # ------------------------------------------------------------ per file
 
-    def ingest_file(self, path: Path) -> None:
+    def ingest_file(self, path: Path, surface: str = "cli") -> None:
         lines, marker = _read_new_lines(self.conn, path, "transcript")
         self.stats["files_seen"] += 1
         if not lines and marker is None:
@@ -154,7 +158,7 @@ class TranscriptIngestor:
                 continue
             self.stats["records"] += 1
             try:
-                self.ingest_record(record, agent_id, agent_type)
+                self.ingest_record(record, agent_id, agent_type, surface)
             except Exception:  # one odd record must not stop the run
                 self.stats["record_errors"] += 1
         _save_offset(self.conn, path, "transcript", marker)
@@ -162,12 +166,12 @@ class TranscriptIngestor:
 
     # ------------------------------------------------------------ per record
 
-    def ingest_record(self, rec: dict, agent_id, agent_type) -> None:
+    def ingest_record(self, rec: dict, agent_id, agent_type, surface: str = "cli") -> None:
         rtype = rec.get("type")
         session_id = rec.get("sessionId")
         ts = norm_ts(rec.get("timestamp"))
         if session_id and ts:
-            self._touch_session(rec, session_id, ts)
+            self._touch_session(rec, session_id, ts, surface)
         if rtype == "assistant":
             self._assistant(rec, session_id, ts, agent_id, agent_type or rec.get("attributionAgent"))
         elif rtype == "user":
@@ -177,17 +181,18 @@ class TranscriptIngestor:
                 self._message(rec.get("uuid"), session_id, agent_id, ts, "compaction", None, "compact boundary")
             elif rec.get("level") == "error" and ts:
                 self._message(rec.get("uuid"), session_id, agent_id, ts, "api_error", None, str(rec.get("content", ""))[:TEXT_CHARS])
-        elif rtype in ("attachment", "queue-operation", "last-prompt", "summary", "file-history-snapshot", "atis-latch"):
+        elif rtype in _METADATA_TYPES:
             pass
         else:
             self.unknown_types[str(rtype)] += 1
 
-    def _touch_session(self, rec: dict, session_id: str, ts: str) -> None:
+    def _touch_session(self, rec: dict, session_id: str, ts: str, surface: str) -> None:
         cwd = rec.get("cwd")
         internal = 1 if cwd and (cwd == self.home or cwd.startswith(self.home + "/")) else 0
         self.conn.execute(
-            """INSERT INTO sessions(session_id, cwd, entrypoint, version, git_branch, permission_mode, first_ts, last_ts, internal)
-               VALUES(?,?,?,?,?,?,?,?,?)
+            """INSERT INTO sessions(session_id, cwd, entrypoint, version, git_branch, permission_mode, first_ts, last_ts,
+                                    internal, surface)
+               VALUES(?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(session_id) DO UPDATE SET
                  cwd=COALESCE(sessions.cwd, excluded.cwd),
                  entrypoint=COALESCE(sessions.entrypoint, excluded.entrypoint),
@@ -196,9 +201,10 @@ class TranscriptIngestor:
                  permission_mode=COALESCE(excluded.permission_mode, sessions.permission_mode),
                  first_ts=MIN(sessions.first_ts, excluded.first_ts),
                  last_ts=MAX(sessions.last_ts, excluded.last_ts),
-                 internal=MAX(sessions.internal, excluded.internal)""",
+                 internal=MAX(sessions.internal, excluded.internal),
+                 surface=COALESCE(sessions.surface, excluded.surface)""",
             (session_id, cwd, rec.get("entrypoint"), rec.get("version"), rec.get("gitBranch"),
-             rec.get("permissionMode"), ts, ts, internal),
+             rec.get("permissionMode"), ts, ts, internal, surface),
         )
 
     def _message(self, uuid, session_id, agent_id, ts, kind, skill, text) -> None:

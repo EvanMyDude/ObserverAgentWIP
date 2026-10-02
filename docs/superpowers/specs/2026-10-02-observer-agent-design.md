@@ -207,6 +207,6 @@ Everything stays on the machine under `~/.observer` (`observer.db`, spool, repor
 
 ## 7. Open assumptions
 
-- The workforce in scope is Claude Code (CLI, Desktop Code tab, subagents, skills). Where Cowork stores its transcripts on macOS is undocumented; `observer doctor` lists candidate JSONL directories under `~/Library/Application Support/Claude` so a compatible location can be added to `transcript_roots`.
+- The workforce in scope is Claude Code (CLI, Desktop Code tab, subagents, skills) and Cowork. The first run on the target Mac showed Cowork keeping a Claude Code transcript tree per session under `~/Library/Application Support/Claude/local-agent-mode-sessions/*/*/local_*/.claude/projects`, so it is read by default and scored separately. Because each Cowork session has its own configuration directory, the design infers that `~/.claude` hooks and settings do not reach it; Cowork-only recommendations are therefore manual steps, and permission prompts approved in Cowork are not captured.
 - Thresholds (3 occurrences, 2 sessions, 14 days, 2x median) are starting values, not measured optima.
 - Recommendation-only autonomy. Auto-applying low-risk changes is deliberately out of scope until the verified-win rate justifies it.

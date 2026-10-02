@@ -39,8 +39,11 @@ def _check_settings_merge(rec, patch) -> tuple:
     merge = patch.get("merge")
     if not isinstance(merge, dict) or set(merge) != {"permissions"} or not isinstance(merge["permissions"], dict):
         return None, "settings patch may only touch `permissions`"
-    perms = merge["permissions"]
-    if not perms or not set(perms) <= ALLOWED_SETTINGS_KEYS:
+    return _check_permissions(merge["permissions"])
+
+
+def _check_permissions(perms) -> tuple:
+    if not isinstance(perms, dict) or not perms or not set(perms) <= ALLOWED_SETTINGS_KEYS:
         return None, "settings patch may only add allow, deny, ask, or additionalDirectories entries"
     risk, reason = classify.LOW, "contraction"
     for key, values in perms.items():
@@ -109,6 +112,9 @@ def gate(rec) -> None:
         text = " ".join(str(patch.get(k, "")) for k in ("steps", "text"))
         if _SUSPICIOUS_TEXT.search(text):
             reason = "instructions mention bypassing safeguards, secrets, or risky commands"
+        elif patch.get("permissions") is not None:
+            # A permission change rewritten as manual steps (Cowork) is rated exactly like the patch it replaced.
+            risk, reason = _check_permissions(patch["permissions"])
         else:
             risk, reason = classify.LOW, "manual review; nothing is changed automatically"
     else:

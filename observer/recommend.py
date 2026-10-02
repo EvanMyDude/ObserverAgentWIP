@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 from . import classify
 from .config import Config
-from .detect import AGENT_FAULT_KINDS, iso
+from .detect import AGENT_FAULT_KINDS, COWORK_PREFIX, iso
 from .store import loads
 
 RISK_WEIGHT = {"low": 1.0, "medium": 2.0, "high": 6.0}
@@ -115,6 +115,27 @@ class Rec:
         }
 
 
+def for_cowork(rec: Rec) -> None:
+    """Rewrite a recommendation whose evidence comes only from Cowork. Cowork sessions run with their own
+    configuration directory (an inference from where they store transcripts), so a patch to ~/.claude may not
+    reach them. The original permission entries stay in the patch so the policy gate still rates them."""
+    patch = rec.patch
+    kind = patch.get("kind")
+    if kind == "append":
+        steps = "Add this to Cowork's instructions (global, or the project's):\n\n%s" % patch.get("text", "")
+        rec.patch = {"kind": "manual", "steps": steps}
+    elif kind == "settings_merge":
+        steps = ("This came from Cowork sessions, which keep their own configuration, so it may not take effect in %s. "
+                 "Apply the equivalent through Cowork's own approval prompts or settings." % patch.get("file"))
+        rec.patch = {"kind": "manual", "steps": steps, "permissions": (patch.get("merge") or {}).get("permissions")}
+    elif kind == "command":
+        steps = ("Cowork sessions run in their own environment, so installing `%s` on your Mac may not reach them. Ask "
+                 "Cowork to install it inside its session, or tell it what to use instead." % patch.get("program"))
+        rec.patch = {"kind": "manual", "steps": steps}
+    rec.target = "cowork:%s" % rec.target
+    rec.title = "%s (Cowork)" % rec.title
+
+
 def rank_score(row) -> float:
     """Estimated minutes saved per week, discounted by confidence and risk. One ranking for every view."""
     risk = row["risk"] or "medium"
@@ -201,6 +222,13 @@ class Recommender:
 
     def add(self, rec: Rec, clusters: list) -> None:
         rec.attach_evidence(clusters, self.cfg.window_days)
+        agents = set().union(*(c.agents for c in clusters)) if clusters else set()
+        cowork = {a for a in agents if a and a.startswith(COWORK_PREFIX)}
+        if agents and cowork == agents:
+            for_cowork(rec)
+        elif cowork and rec.patch.get("kind") in ("settings_merge", "append", "command"):
+            rec.rationale += (" Some of this happened in Cowork, which runs with its own configuration, so make the "
+                              "same change in Cowork too.")
         self.recs.append(rec)
 
     def recurring(self, count: int, sessions: int) -> bool:
@@ -274,6 +302,7 @@ class Recommender:
             if not prog or count < self.cfg.missing_cli_min_occurrences:
                 continue
             projects = set().union(*(c.projects for c in clusters))
+            cowork_only = all(a.startswith(COWORK_PREFIX) for c in clusters for a in c.agents)
             if prog in ALIASES:
                 target_file = claude_md_target(projects)
                 text = "- This machine has `%s`, not `%s`; always call `%s`." % (ALIASES[prog], prog, ALIASES[prog])
@@ -288,7 +317,9 @@ class Recommender:
                     clusters=[],
                 ), clusters)
                 continue
-            installed = shutil.which(prog, path=os.pathsep.join([os.environ.get("PATH", "")] + EXTRA_PATH))
+            # Your Mac's PATH says nothing about Cowork's environment, so skip this check for Cowork-only evidence.
+            installed = None if cowork_only else shutil.which(
+                prog, path=os.pathsep.join([os.environ.get("PATH", "")] + EXTRA_PATH))
             if installed:
                 # Installed but not found by the agent: its shell has a different PATH than yours.
                 self.add(Rec(
@@ -438,10 +469,12 @@ def scorecard(conn: sqlite3.Connection, cfg: Config, now: datetime.datetime) -> 
     calls = defaultdict(int)
     sessions = defaultdict(set)
     for r in conn.execute(
-        "SELECT t.agent_type, t.skill, t.session_id FROM tool_calls t JOIN sessions s USING(session_id) "
+        "SELECT t.agent_type, t.skill, t.session_id, s.surface FROM tool_calls t JOIN sessions s USING(session_id) "
         "WHERE t.ts >= ? AND s.internal = 0", (start,)
     ):
         key = "agent:%s" % r["agent_type"] if r["agent_type"] else ("skill:%s" % r["skill"] if r["skill"] else "main")
+        if r["surface"] == "cowork":
+            key = COWORK_PREFIX + key  # must match the agent_key detect.Detector.emit writes
         calls[key] += 1
         sessions[key].add(r["session_id"])
     faults = defaultdict(Counter)
@@ -467,14 +500,16 @@ def scorecard(conn: sqlite3.Connection, cfg: Config, now: datetime.datetime) -> 
             r["calls"] >= cfg.min_tool_calls_for_scorecard and len(eligible) >= 2
             and r["rate"] >= cfg.underperf_min_rate and median > 0 and r["rate"] >= cfg.underperf_ratio * median
         )
-        name = r["agent"].split(":", 1)[-1]
-        if r["agent"].startswith("skill:") and name in paths:
+        base = r["agent"][len(COWORK_PREFIX):] if r["agent"].startswith(COWORK_PREFIX) else r["agent"]
+        name = base.split(":", 1)[-1]
+        if base.startswith("skill:") and name in paths:
             r["definition"] = os.path.join(paths[name], "SKILL.md")
-        elif r["agent"].startswith("agent:"):
+        elif base.startswith("agent:"):
             r["definition"] = "~/.claude/agents/%s.md (or the project's .claude/agents/)" % name
         else:
             r["definition"] = ""
-    rows.sort(key=lambda r: (-r["rate"], -r["calls"]))
+    # Agents with too few calls for a meaningful rate go last, so one bad call does not top the table.
+    rows.sort(key=lambda r: (r["calls"] < cfg.min_tool_calls_for_scorecard, -r["rate"], -r["calls"]))
     return rows
 
 

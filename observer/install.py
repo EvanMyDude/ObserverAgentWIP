@@ -231,9 +231,15 @@ def doctor(cfg: Config) -> int:
         print("%s %s" % ("[ok]  " if good else ("[fail]" if required else "[warn]"), text))
 
     line(sys.version_info >= (3, 9), "Python %s at %s" % (sys.version.split()[0], sys.executable), required=True)
-    for root in cfg.roots():
-        count = len(list(root.glob("*/*.jsonl"))) if root.is_dir() else 0
-        line(count > 0, "Transcripts: %d session files under %s" % (count, root), required=True)
+    counts = {"cli": 0, "cowork": 0}
+    for root, surface in cfg.roots():
+        counts[surface] += len(list(root.glob("*/*.jsonl"))) if root.is_dir() else 0
+    cli_roots = ", ".join(str(r) for r, s in cfg.roots() if s == "cli")
+    line(counts["cli"] + counts["cowork"] > 0,
+         "Transcripts: %d Claude Code session files under %s" % (counts["cli"], cli_roots), required=True)
+    if sys.platform == "darwin" or counts["cowork"]:
+        print("[info] Cowork: %d session files (hooks do not apply there; Cowork keeps its own configuration)"
+              % counts["cowork"])
     claude = shutil.which(cfg.claude_bin)
     version = ""
     if claude:
@@ -261,13 +267,15 @@ def doctor(cfg: Config) -> int:
     if support.is_dir():
         found = {}
         for path in support.rglob("*.jsonl"):
+            if "local-agent-mode-sessions" in path.parts:
+                continue  # Cowork: read through cowork_transcript_globs
             found.setdefault(str(path.parent), 0)
             found[str(path.parent)] += 1
             if len(found) > 20:
                 break
         if found:
-            print("[info] JSONL directories under %s (possible Desktop or Cowork transcripts; the format is not "
-                  "verified, so inspect before adding a parent to transcript_roots):" % support)
+            print("[info] Other JSONL directories under %s (not read; the format is unverified, so inspect one "
+                  "before adding it to transcript_roots):" % support)
             for directory, n in sorted(found.items(), key=lambda kv: -kv[1])[:10]:
                 print("       %4d  %s" % (n, directory))
     return 0 if ok else 1

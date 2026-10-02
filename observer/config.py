@@ -1,6 +1,7 @@
 """Configuration with defaults, overridable from ~/.observer/config.json."""
 from __future__ import annotations
 
+import glob
 import json
 import os
 import sys
@@ -34,6 +35,10 @@ class Config:
     transcript_roots: list = field(
         default_factory=lambda: [os.path.join(os.environ.get("CLAUDE_CONFIG_DIR", "~/.claude"), "projects")]
     )
+    # Cowork runs Claude Code in its own environment and keeps one transcript tree per session here.
+    cowork_transcript_globs: list = field(default_factory=lambda: [
+        "~/Library/Application Support/Claude/local-agent-mode-sessions/*/*/local_*/.claude/projects"
+    ])
     window_days: int = 14
     min_occurrences: int = 3
     min_sessions: int = 2
@@ -78,7 +83,12 @@ class Config:
         return self.home / "logs"
 
     def roots(self) -> list:
-        return [Path(r).expanduser() for r in self.transcript_roots]
+        """(directory, surface) pairs: "cli" covers the terminal and the Desktop Code tab; "cowork" covers
+        Cowork sessions, which run with their own configuration directory."""
+        out = [(Path(r).expanduser(), "cli") for r in self.transcript_roots]
+        for pattern in self.cowork_transcript_globs:
+            out += [(Path(p), "cowork") for p in sorted(glob.glob(os.path.expanduser(pattern)))]
+        return out
 
     def to_dict(self) -> dict:
         return asdict(self)

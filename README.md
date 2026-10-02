@@ -81,13 +81,13 @@ Everything stays in `~/.observer` with owner-only permissions: `observer.db` (SQ
 
 - **Judge failed under launchd.** The report says why and falls back to rules. Run `make run` in a terminal to compare; if that works, the launchd job cannot reach your Claude login, so set `"judge_enabled": false` or run the judge interactively.
 - **Unrecognized record types in Pipeline health.** Claude Code's transcript format is internal and changes between versions. The parser skips what it does not understand and counts it there.
-- **Cowork or Desktop sessions missing.** `make doctor` lists JSONL directories under `~/Library/Application Support/Claude`. Their format is unverified; inspect one before adding its parent to `transcript_roots`.
+- **Cowork sessions.** Read automatically from `~/Library/Application Support/Claude/local-agent-mode-sessions/*/*/local_*/.claude/projects` and scored as `cowork/...` agents. Cowork keeps its own configuration, so the hooks do not run there, and Cowork-only recommendations are written as steps to apply in Cowork rather than edits to `~/.claude`. `make doctor` lists any other JSONL directories it finds without reading them.
 - **Remove everything.** `make uninstall`, then delete `~/.observer`.
 
 ## Development
 
 ```bash
-make test   # 52 tests: classifier, policy gate, pipeline scenario, judge with a fake claude binary, hook, installer
+make test   # 56 tests: classifier, policy gate, pipeline scenario, judge with a fake claude binary, hook, installer
 ```
 
 The test fixtures reproduce record shapes captured from Claude Code 2.1.287 transcripts. `tests/test_judge.py` includes a prompt-injection case in which the judge proposes `Bash(curl *)`; the gate must block it.

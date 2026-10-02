@@ -37,6 +37,8 @@ def render_patch(patch: dict) -> str:
     if kind == "command":
         return "Run:\n\n%s" % _code(str(patch.get("command", "")), "bash")
     steps = str(patch.get("steps") or "")
+    if patch.get("permissions"):
+        steps += "\n\n%s" % _code(json.dumps({"permissions": patch["permissions"]}, indent=2), "json")
     file = patch.get("file")
     return steps + ("\n\nFile: `%s`" % file if file else "")
 
@@ -123,7 +125,8 @@ def render(ctx: dict, cfg) -> str:
         for r in score[:15]:
             top = ", ".join("%s %d" % (k.replace("_", " "), n) for k, n in r["top"][:3]) or "none"
             flag = "underperforming" if r["underperforming"] else ""
-            out.append("| %s | %d | %d | %.1f | %s | %s |" % (r["agent"], r["calls"], r["sessions"], r["rate"], top, flag))
+            rate = "%.1f" % r["rate"] if r["calls"] >= cfg.min_tool_calls_for_scorecard else "n/a (few calls)"
+            out.append("| %s | %d | %d | %s | %s | %s |" % (r["agent"], r["calls"], r["sessions"], rate, top, flag))
         out.append("")
 
     kinds = ctx["friction_by_kind"]
@@ -157,13 +160,15 @@ def friction_by_kind(conn, start: str) -> dict:
 def health_lines(ingest_stats: Counter, spool_stats: Counter, hook_total: int, judge_status: str, unknown: Counter,
                  hooks_installed: bool, notification_counts: Counter) -> list:
     lines = [
-        "Transcripts: %d files checked, %d read, %d records, %d tool calls, %d parse errors, %d record errors." % (
-            ingest_stats.get("files_seen", 0), ingest_stats.get("files_read", 0), ingest_stats.get("records", 0),
-            ingest_stats.get("tool_calls", 0), ingest_stats.get("parse_errors", 0), ingest_stats.get("record_errors", 0)),
+        "Transcripts: %d files checked (%d Claude Code, %d Cowork), %d read, %d records, %d tool calls, "
+        "%d parse errors, %d record errors." % (
+            ingest_stats.get("files_seen", 0), ingest_stats.get("files_cli", 0), ingest_stats.get("files_cowork", 0),
+            ingest_stats.get("files_read", 0), ingest_stats.get("records", 0), ingest_stats.get("tool_calls", 0),
+            ingest_stats.get("parse_errors", 0), ingest_stats.get("record_errors", 0)),
     ]
     if unknown:
-        lines.append("Unrecognized record types (possible format change): %s." % ", ".join(
-            "%s %d" % kv for kv in unknown.most_common(5)))
+        lines.append("Record types the parser does not recognize (usually new metadata; a concern only if tool calls "
+                     "drop to zero): %s." % ", ".join("%s %d" % kv for kv in unknown.most_common(5)))
     if hooks_installed or hook_total:
         lines.append("Hooks: %d new events this run, %d in the database." % (spool_stats.get("hook_events", 0), hook_total))
         if notification_counts:
