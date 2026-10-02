@@ -52,10 +52,10 @@ def run(cfg: Config, use_judge: bool = True, send_notification: bool = False, no
 
     detect_stats = detect(conn, cfg, now)
     clusters = recommend.build_clusters(conn, cfg, now)
-    recs = recommend.candidates(conn, cfg, now, clusters)
-    for rec in recs:
-        policy.gate(rec)
     scorecard = recommend.scorecard(conn, cfg, now)
+    recs = recommend.candidates(conn, cfg, now, clusters, scorecard)
+    for rec in recs:
+        policy.gate(rec)  # the judge sees each candidate's risk
 
     judge_status, summary, attributions = "skipped (--no-llm)", "", {}
     if use_judge and cfg.judge_enabled:
@@ -77,14 +77,15 @@ def run(cfg: Config, use_judge: bool = True, send_notification: bool = False, no
                 judge_status = "failed (%s); report uses deterministic rules only" % status
             else:
                 new, attributions = judge.apply_judgment(data, recs, clusters, cfg)
-                for rec in new:
-                    policy.gate(rec)
                 recs += new
                 summary = data.get("summary", "")[:800]
                 judge_status = "ok (%s, %d attributions, %d new recommendations)" % (cfg.judge_model, len(attributions), len(new))
     elif not cfg.judge_enabled:
         judge_status = "disabled in config"
 
+    # The gate has the final say: re-check everything, because the judge can revise existing candidates.
+    for rec in recs:
+        policy.gate(rec)
     outcomes.upsert(conn, recs, now_iso)
     outcome_changes = outcomes.update_outcomes(conn, cfg, now)
 
@@ -126,7 +127,7 @@ def run(cfg: Config, use_judge: bool = True, send_notification: bool = False, no
 
     open_rows = [r for r in rec_rows if r["status"] == "open"]
     if send_notification and cfg.notify:
-        top = max(open_rows, key=lambda r: (r["impact_minutes_week"] or 0) * (r["confidence"] or 0), default=None)
+        top = max(open_rows, key=recommend.rank_score, default=None)
         notify("Observer: %d recommendations" % len(open_rows), top["title"] if top else "No recurring friction today.")
     conn.close()
     return {"report": str(path), "stats": stats, "judge": judge_status, "open": len(open_rows)}

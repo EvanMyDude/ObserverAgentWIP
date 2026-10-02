@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 
+from .recommend import rank_score
 from .store import loads
 
 KIND_LABELS = {
@@ -76,8 +77,7 @@ def render(ctx: dict, cfg) -> str:
     rows = ctx["recommendations"]          # DB rows for recommendations seen in this run
     current = [r for r in rows if r["status"] == "open"]
     demoted = {r["id"] for r in current if (loads(r["evidence_json"], {}) or {}).get("demoted")}
-    ranked = sorted(current, key=lambda r: (r["impact_minutes_week"] or 0) * (r["confidence"] or 0)
-                    / {"low": 1.0, "medium": 2.0}.get(r["risk"], 6.0), reverse=True)
+    ranked = sorted(current, key=rank_score, reverse=True)
     do_today = [r for r in ranked if r["id"] not in demoted and (r["confidence"] or 0) >= 0.6][: cfg.max_do_today]
     consider = [r for r in ranked if r not in do_today]
     blocked = [r for r in rows if r["status"] == "blocked"]

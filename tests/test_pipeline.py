@@ -132,6 +132,20 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual((self.cfg.reports_dir / "latest.md").read_text(), report)
 
 
+class OutsideWorkdirFingerprintTest(unittest.TestCase):
+    def test_bash_paths_come_from_the_error_or_command(self):
+        # Review finding: Bash calls have no file_path, so every one was fingerprinted "dir:" and dropped.
+        from observer.detect import _error_fingerprint
+        row = {"error_class": "outside_workdir", "tool_name": "Bash",
+               "result_excerpt": "cd to '/Users/me/other-repo/src' was blocked: outside the allowed working "
+                                 "directories. Ask the user to add the directory with /add-dir."}
+        self.assertEqual(_error_fingerprint(row, {"command": "cd /Users/me/other-repo/src && ls"}),
+                         "dir:/Users/me/other-repo/src")
+        row["result_excerpt"] = "blocked: outside the working directories"
+        self.assertEqual(_error_fingerprint(row, {"command": "ls /Users/me/elsewhere/data/file.csv"}),
+                         "dir:/Users/me/elsewhere/data")
+
+
 class IncrementalIngestTest(unittest.TestCase):
     def test_partial_lines_wait_for_completion(self):
         tmp = Path(tempfile.mkdtemp())

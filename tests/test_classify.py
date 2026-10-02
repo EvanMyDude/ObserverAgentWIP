@@ -59,12 +59,18 @@ class ShellTest(unittest.TestCase):
         self.assertEqual(c.first_program("cd repo && FOO=1 pytest -q"), "pytest")
         self.assertEqual(c.first_program("/usr/local/bin/jq . x.json"), "jq")
 
-    def test_bash_risk(self):
-        self.assertEqual(c.bash_risk("ls -la | head")[0], "low")
-        self.assertEqual(c.bash_risk("cat x 2>/dev/null")[0], "low")
-        self.assertEqual(c.bash_risk("ls > out.txt")[0], "medium")
-        self.assertEqual(c.bash_risk("echo `id`")[0], "high")
-        self.assertEqual(c.bash_risk("find . -name x -delete")[0], "high")
+    def test_wildcard_rules_are_rated_by_the_worst_command_they_permit(self):
+        # Review findings: a rule with no subcommand, or a read-only program with a dangerous flag,
+        # permits far more than its usual use.
+        for rule in ("Bash(git --no-pager *)", "Bash(git -C /x *)", "Bash(/usr/bin/git *)", "Bash(npm *)",
+                     "Bash(rg *)", "Bash(fd *)", "Bash(find *)", "Bash(make *)"):
+            with self.subTest(rule=rule):
+                self.assertEqual(c.rule_risk(rule)[0], "high")
+        for rule in ("Bash(sort *)", "Bash(yq *)", "Bash(sed *)", "Bash(uniq *)"):
+            with self.subTest(rule=rule):
+                self.assertEqual(c.rule_risk(rule)[0], "medium")
+        self.assertEqual(c.rule_risk("Bash(git --no-pager log *)")[0], "low")
+        self.assertEqual(c.rule_risk("Bash(sed -n 1p notes.txt)")[0], "low")
 
     def test_missing_program(self):
         self.assertEqual(c.missing_program("bash: jq: command not found"), "jq")
@@ -82,6 +88,39 @@ class ResultTest(unittest.TestCase):
                          ("error", "edit_mismatch"))
         self.assertEqual(c.classify_result("Bash", {"command": "ls /nope"}, "Exit code 3\nls: cannot access '/nope': No such file or directory", True),
                          ("error", "file_not_found"))
+
+    def test_errno_tokens_do_not_match_inside_words(self):
+        # Review finding: case-insensitive ENOTFOUND matched "FileNotFoundError".
+        text = "Exit code 1\nFileNotFoundError: [Errno 2] No such file or directory: 'x'"
+        self.assertEqual(c.classify_result("Bash", {"command": "python3 x.py"}, text, True), ("error", "file_not_found"))
+        self.assertEqual(c.classify_result("Bash", {"command": "node x"}, "Error: getaddrinfo ENOTFOUND api.x.com", True),
+                         ("error", "network"))
+
+    def test_check_failures_win_over_words_in_their_output(self):
+        # Review finding: a failing test mentioning 403 was classified as an auth failure.
+        self.assertEqual(c.classify_result("Bash", {"command": "npm test"}, "Exit code 1\n expected 403 to equal 200", True),
+                         ("error", "check_failure"))
+        self.assertEqual(c.classify_result("Bash", {"command": "pytest -q"}, "Exit code 127\nbash: pytest: command not found", True),
+                         ("error", "command_not_found"))
+
+    def test_check_detection_uses_the_program_not_any_word(self):
+        # Second review: `npm install -D eslint` and `brew tap` were treated as test runs, hiding real errors.
+        self.assertEqual(c.classify_result("Bash", {"command": "npm install -D eslint"}, "npm ERR! code E401 Unauthorized", True),
+                         ("error", "auth"))
+        self.assertEqual(c.classify_result("Bash", {"command": "brew tap foo/bar"}, "Error: could not resolve host github.com", True),
+                         ("error", "network"))
+        for command in ("npm test", "npm run test:unit", "cd app && pytest -q", "python3 -m pytest", "uv run mypy .",
+                        "npx eslint src", "go test ./...", "cargo clippy", "make test", "prettier --check ."):
+            with self.subTest(command=command):
+                self.assertTrue(c.is_check_command(command))
+        for command in ("npm install eslint", "brew tap x/y", "git log --grep=test", "make build", "prettier --write ."):
+            with self.subTest(command=command):
+                self.assertFalse(c.is_check_command(command))
+
+    def test_exact_version_rules_stay_low(self):
+        for rule in ("Bash(npm --version)", "Bash(cargo -v)", "Bash(git --version)"):
+            with self.subTest(rule=rule):
+                self.assertEqual(c.rule_risk(rule)[0], "low")
 
     def test_benign_failures(self):
         self.assertEqual(c.classify_result("Bash", {"command": "grep foo x"}, "Exit code 1", True), ("error", "no_match"))
@@ -117,6 +156,19 @@ class ResultTest(unittest.TestCase):
     def test_input_key_matches_hook_and_transcript(self):
         self.assertEqual(c.input_key("Bash", {"command": "git log", "description": "a"}),
                          c.input_key("Bash", {"command": "git log"}))
+
+    def test_hook_computes_the_same_key(self):
+        # hook.py runs standalone, so it carries its own copy of input_key; the two must agree.
+        import importlib.util
+        from observer import install
+        spec = importlib.util.spec_from_file_location("observer_hook", str(install.HOOK_SCRIPT))
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+        cases = [("Bash", {"command": "git commit -m '" + "x" * 5000 + "'"}), ("Read", {"file_path": "/a/b"}),
+                 ("WebFetch", {"url": "https://x.y/z"}), ("mcp__s__t", {"q": "\u00e9" * 3000, "n": 1}), ("Bash", None)]
+        for tool, tool_input in cases:
+            with self.subTest(tool=tool):
+                self.assertEqual(hook._input_key(tool, tool_input), c.input_key(tool, tool_input))
 
 
 if __name__ == "__main__":

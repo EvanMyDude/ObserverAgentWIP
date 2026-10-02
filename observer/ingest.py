@@ -336,7 +336,8 @@ def ingest_spool(conn: sqlite3.Connection, cfg: Config) -> Counter:
                 stats["parse_errors"] += 1
                 continue
             tool_name = event.get("tool_name")
-            key = classify.input_key(tool_name, event.get("tool_input")) if tool_name else None
+            # The hook computes the key before clipping long inputs; recompute only for older spool lines.
+            key = event.get("input_key") or (classify.input_key(tool_name, event.get("tool_input")) if tool_name else None)
             conn.execute(
                 "INSERT OR IGNORE INTO hook_events(id, ts, event, session_id, cwd, tool_name, input_key, payload_json) "
                 "VALUES(?,?,?,?,?,?,?,?)",

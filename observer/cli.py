@@ -7,6 +7,7 @@ import sys
 
 from . import install, outcomes, pipeline
 from .config import ensure_home, load_config
+from .recommend import rank_score
 from .report import render_patch
 from .store import connect, loads
 
@@ -27,8 +28,8 @@ def cmd_list(cfg, args) -> int:
     conn = _conn(cfg)
     statuses = ("open", "blocked", "applied", "verified", "not_effective", "dismissed") if args.all else ("open",)
     rows = conn.execute(
-        "SELECT * FROM recommendations WHERE status IN (%s) ORDER BY impact_minutes_week * confidence DESC"
-        % ",".join("?" * len(statuses)), statuses).fetchall()
+        "SELECT * FROM recommendations WHERE status IN (%s)" % ",".join("?" * len(statuses)), statuses).fetchall()
+    rows = sorted(rows, key=rank_score, reverse=True)
     if not rows:
         print("No recommendations%s." % ("" if args.all else " open"))
     for r in rows:

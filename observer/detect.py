@@ -6,6 +6,7 @@ import bisect
 import datetime
 import hashlib
 import json
+import os
 import re
 import sqlite3
 from collections import Counter, defaultdict
@@ -72,6 +73,8 @@ def _error_fingerprint(call: sqlite3.Row, tool_input: dict) -> str:
         return "missing:%s" % prog
     if cls == "outside_workdir":
         path = str(tool_input.get("file_path") or tool_input.get("path") or tool_input.get("notebook_path") or "")
+        if not path:  # Bash and other tools: the blocked path is named in the error or the command
+            path = _first_abs_path(call["result_excerpt"] or "") or _first_abs_path(str(tool_input.get("command", "")))
         return "dir:%s" % _dir_bucket(path)
     if tool.startswith("mcp__"):
         return "mcp:%s:%s" % (tool.split("__")[1] if "__" in tool else tool, cls)
@@ -80,8 +83,22 @@ def _error_fingerprint(call: sqlite3.Row, tool_input: dict) -> str:
     return "%s:%s" % (tool, cls)
 
 
+_ABS_PATH_RE = re.compile(r"(?:^|(?<=[\s'\"`(=]))((?:/|~/)[^\s'\"`;|&<>()]+)")
+
+
+def _first_abs_path(text: str) -> str:
+    """First absolute or home-relative path with at least two components (skips `/add-dir`, `/dev/null`)."""
+    for match in _ABS_PATH_RE.finditer(text or ""):
+        path = match.group(1).rstrip(".,:")
+        if path.startswith("/dev/") or len([p for p in path.split("/") if p]) < 2:
+            continue
+        return path
+    return ""
+
+
 def _dir_bucket(path: str) -> str:
     """Group paths by their first four components (/Users/name/Documents/Project)."""
+    path = os.path.expanduser(path) if path else ""
     if not path:
         return ""
     parts = [p for p in path.split("/") if p]

@@ -24,6 +24,7 @@ _SUSPICIOUS_TEXT = re.compile(
     re.I,
 )
 _INSTALL_RE = re.compile(r"^brew install [a-z0-9][a-z0-9@+._/-]*$")
+_GENERIC_INSTALL_RE = re.compile(r"^install [A-Za-z0-9][A-Za-z0-9@+._-]* with your package manager$")
 _CONTEXT_FILE_RE = re.compile(r"(?:^|/)(?:CLAUDE(?:\.local)?\.md|SKILL\.md|\.claude/rules/[\w.-]+\.md|\.claude/agents/[\w.-]+\.md)$")
 
 
@@ -100,7 +101,7 @@ def gate(rec) -> None:
         command = str(patch.get("command", ""))
         if _INSTALL_RE.match(command):
             risk, reason = classify.MEDIUM, "installs a package from Homebrew"
-        elif command.startswith("install ") and " with your package manager" in command:
+        elif _GENERIC_INSTALL_RE.match(command):
             risk, reason = classify.MEDIUM, "installs a package"
         else:
             reason = "only `brew install <formula>` commands are allowed"

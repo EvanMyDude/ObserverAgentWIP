@@ -35,15 +35,15 @@ _ERROR_PATTERNS = [
     (
         "network",
         r"could not resolve host|name or service not known|nodename nor servname|getaddrinfo|"
-        r"ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|network is unreachable|"
+        r"(?-i:\bE(?:CONNREFUSED|CONNRESET|TIMEDOUT|NOTFOUND|AI_AGAIN)\b)|network is unreachable|"
         r"connection (?:refused|reset|timed out)|certificate verify failed|SSL(?:Error| routines)",
     ),
     ("timeout", r"timed out|timeout"),
     ("edit_mismatch", r"String to replace not found|matches of the string to replace"),
     ("not_read_first", r"File has not been read yet|File must be read first|modified since (?:it was )?(?:last )?read"),
     ("file_too_large", r"exceeds (?:the )?maximum|too large to|file content \(\d+ tokens\)"),
-    ("file_not_found", r"File does not exist|No such file or directory|ENOENT|does not exist|cannot find the path"),
-    ("os_permission", r"Permission denied|EACCES|EPERM|Operation not permitted"),
+    ("file_not_found", r"File does not exist|No such file or directory|(?-i:\bENOENT\b)|does not exist|cannot find the path"),
+    ("os_permission", r"Permission denied|(?-i:\bE(?:ACCES|PERM)\b)|Operation not permitted"),
     ("input_invalid", r"InputValidationError|<tool_use_error>|Invalid (?:tool )?(?:input|parameters?)|Unknown (?:tool|parameter)"),
 ]
 _ERROR_RES = [(name, re.compile(pattern, re.I)) for name, pattern in _ERROR_PATTERNS]
@@ -56,12 +56,11 @@ ENVIRONMENT_ERROR_CLASSES = {"auth", "network", "timeout", "rate_limit", "mcp_er
 MODEL_ERROR_CLASSES = {"edit_mismatch", "not_read_first", "file_not_found", "input_invalid", "file_too_large"}
 
 _SEARCH_PROGRAMS = {"grep", "egrep", "fgrep", "rg", "ag", "ack", "git-grep"}
-_CHECK_RE = re.compile(
-    r"\b(pytest|py\.test|jest|vitest|mocha|ava|tap|rspec|phpunit|unittest|nox|tox|"
-    r"go (?:test|vet)|cargo (?:test|check|clippy)|(?:npm|pnpm|yarn|bun) (?:run )?(?:test|lint|typecheck|check)|"
-    r"make (?:test|check|lint)|tsc|eslint|ruff|mypy|pyright|flake8|pylint|black --check|prettier --check|"
-    r"shellcheck|golangci-lint|swiftlint|xcodebuild test)\b"
-)
+_CHECK_TOOLS = {"pytest", "py.test", "jest", "vitest", "mocha", "ava", "tox", "nox", "tsc", "eslint", "ruff", "mypy",
+                "pyright", "flake8", "pylint", "shellcheck", "golangci-lint", "swiftlint", "rspec", "phpunit", "unittest"}
+_CHECK_SCRIPTS = {"test", "tests", "lint", "typecheck", "type-check", "check", "verify"}
+_CHECK_SUBCOMMANDS = {"go": {"test", "vet"}, "cargo": {"test", "check", "clippy"}, "make": {"test", "check", "lint"},
+                      "swift": {"test"}, "dotnet": {"test"}, "mvn": {"test", "verify"}, "gradle": {"test", "check"}}
 _MISSING_RES = [
     re.compile(r"command not found: ([\w.+-]+)"),
     re.compile(r"(?:^|\n)\s*(?:[\w./-]*sh:\s*)?(?:line \d+:\s*)?([\w.+-]+): command not found"),
@@ -118,21 +117,58 @@ def classify_result(tool_name: str, tool_input, text: str, is_error) -> tuple:
         return "denied", None
     if not is_error:
         return "ok", None
+    command = ""
+    if tool_name == "Bash" and isinstance(tool_input, dict):
+        command = str(tool_input.get("command", ""))
+        # A failing test or lint run is normal iteration, whatever its output mentions (a 403 in an
+        # assertion, a timeout in a test name). Only a missing tool or blocked directory still counts.
+        if is_check_command(command):
+            for name, regex in _ERROR_RES:
+                if name in GAP_ERROR_CLASSES and regex.search(text):
+                    return "error", name
+            return "error", "check_failure"
     for name, regex in _ERROR_RES:
         if regex.search(text):
             return "error", name
     if tool_name == "Bash":
-        command = (tool_input or {}).get("command", "") if isinstance(tool_input, dict) else ""
-        program = first_program(command)
         body = re.sub(r"^\s*(?:Error: )?Exit code \d+\s*", "", text).strip()
-        if program in _SEARCH_PROGRAMS and re.match(r"^\s*(?:Error: )?Exit code 1\b", text) and not body:
+        if first_program(command) in _SEARCH_PROGRAMS and re.match(r"^\s*(?:Error: )?Exit code 1\b", text) and not body:
             return "error", "no_match"
-        if _CHECK_RE.search(command):
-            return "error", "check_failure"
         return "error", "nonzero_exit"
     if tool_name.startswith("mcp__"):
         return "error", "mcp_error"
     return "error", "other"
+
+
+def is_check_command(command: str) -> bool:
+    """True when the first real command is a test, lint, or type-check run. Decided from the program and
+    subcommand, never from words elsewhere in the command (`npm install -D eslint` is not a check)."""
+    for segment in _scan(command or "")["segments"]:
+        words = _words(segment)
+        if not words or words[0] in ("cd", "pushd", "popd", "export", "set", "true", ":"):
+            continue
+        prog, args = words[0].rsplit("/", 1)[-1], words[1:]
+        if prog in ("npx", "bunx", "pnpx", "uvx") and args:
+            prog, args = args[0].rsplit("/", 1)[-1], args[1:]
+        elif prog in ("uv", "poetry", "pipenv") and len(args) >= 2 and args[0] == "run":
+            prog, args = args[1].rsplit("/", 1)[-1], args[2:]
+        if prog in ("python", "python3") and len(args) >= 2 and args[0] == "-m":
+            prog, args = args[1], args[2:]
+        positional = [a for a in args if not a.startswith("-")]
+        sub = positional[0] if positional else ""
+        if prog in _CHECK_TOOLS:
+            return True
+        if prog in ("black", "prettier", "gofmt", "rustfmt") and any(a in ("--check", "-l", "--list-different") for a in args):
+            return True
+        if prog in ("npm", "pnpm", "yarn", "bun"):
+            script = positional[1] if sub == "run" and len(positional) > 1 else sub
+            return script in _CHECK_SCRIPTS or script.split(":", 1)[0] in _CHECK_SCRIPTS
+        if prog in _CHECK_SUBCOMMANDS:
+            return sub in _CHECK_SUBCOMMANDS[prog]
+        if prog == "xcodebuild":
+            return "test" in args
+        return False
+    return False
 
 
 def missing_program(text: str) -> str | None:
@@ -239,12 +275,12 @@ LOW, MEDIUM, HIGH = "low", "medium", "high"
 RISK_ORDER = {LOW: 0, MEDIUM: 1, HIGH: 2}
 
 _READ_ONLY = {
-    "cd", "pushd", "popd", ":", "ls", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "rg", "ag", "ack", "fd", "tree", "pwd",
+    "cd", "pushd", "popd", ":", "ls", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "ag", "ack", "pwd",
     "echo", "printf", "which", "whereis", "type", "file", "stat", "du", "df", "ps", "uname", "date",
-    "whoami", "id", "hostname", "sort", "uniq", "cut", "tr", "diff", "cmp", "comm", "jq", "yq", "realpath",
+    "whoami", "id", "hostname", "cut", "tr", "diff", "cmp", "comm", "jq", "realpath",
     "dirname", "basename", "readlink", "md5", "md5sum", "shasum", "sha256sum", "sha1sum", "test", "true",
     "false", "sw_vers", "mdfind", "mdls", "column", "nl", "seq", "less", "more", "lsof", "pgrep",
-    "otool", "nm", "strings", "xxd", "hexdump", "od", "wc", "sleep", "cal", "uptime", "locale",
+    "otool", "nm", "strings", "hexdump", "od", "wc", "sleep", "cal", "uptime", "locale",
 }
 _HIGH = {
     "curl", "wget", "http", "https", "httpie", "nc", "ncat", "netcat", "telnet", "ftp", "ssh", "scp", "sftp",
@@ -278,7 +314,7 @@ _SUBCOMMAND_RISK = {
     },
     "_pkg": {
         LOW: {"test", "ls", "list", "view", "info", "outdated", "audit", "why", "explain", "show", "freeze",
-              "search", "doctor", "--version", "-v", "version", "check", "lint", "typecheck", "tree"},
+              "search", "doctor", "version", "check", "lint", "typecheck", "tree"},
         MEDIUM: {"run", "install", "i", "ci", "add", "remove", "uninstall", "update", "upgrade", "build",
                  "sync", "lock", "fmt", "format", "clippy", "vet", "tidy", "start", "dev"},
         HIGH: {"publish", "exec", "dlx", "x", "link", "unpublish", "deprecate", "owner", "login", "logout",
@@ -298,7 +334,20 @@ _INFRA_TOOLS = {"docker", "kubectl", "terraform", "aws", "gcloud", "az", "heroku
 _CHECK_PROGRAMS = {"pytest", "jest", "vitest", "mocha", "tsc", "eslint", "ruff", "mypy", "pyright", "flake8",
                    "pylint", "shellcheck", "golangci-lint", "swiftlint", "rspec", "phpunit"}
 _WRITE_LOCAL = {"mkdir", "touch", "cp", "mv", "ln", "tee", "patch", "prettier", "black", "gofmt", "rustfmt",
-                "isort", "open", "unzip", "tar", "zip", "gzip", "gunzip"}
+                "isort", "open", "unzip", "tar", "zip", "gzip", "gunzip", "uniq"}
+# Programs that are read-only unless given certain flags. An allow rule ending in a wildcard permits
+# those flags, so such a rule is rated by the flag's risk, not by the program's usual use.
+_FLAG_RISK = {
+    "find": (("-exec", "-execdir", "-delete", "-ok", "-okdir", "-fprint", "-fprintf", "-fls"), HIGH,
+             "find can run commands or delete files with -exec or -delete"),
+    "fd": (("-x", "--exec", "-X", "--exec-batch"), HIGH, "fd can run commands with --exec"),
+    "rg": (("--pre",), HIGH, "rg --pre runs a command for every file"),
+    "sed": (("-i", "--in-place"), MEDIUM, "sed -i edits files in place"),
+    "yq": (("-i", "--inplace"), MEDIUM, "yq -i edits files in place"),
+    "sort": (("-o", "--output"), MEDIUM, "sort -o writes files"),
+    "tree": (("-o",), MEDIUM, "tree -o writes files"),
+    "xxd": (("-r", "-revert"), MEDIUM, "xxd -r writes files"),
+}
 _GH_READ_VERBS = {"view", "list", "status", "diff", "checks", "watch"}
 _GH_HIGH_NOUNS = {"api", "secret", "variable", "ssh-key", "gpg-key", "codespace", "extension", "alias", "auth",
                   "config", "attestation", "cache"}
@@ -348,7 +397,17 @@ def _broad_path(content: str) -> bool:
     return path.startswith("/") and depth <= 2
 
 
-def segment_risk(words: list) -> tuple:
+def _has_flag(arg: str, flags: tuple) -> bool:
+    for flag in flags:
+        if arg == flag or arg.startswith(flag + "="):
+            return True
+        if len(flag) == 2 and flag[0] == "-" and arg.startswith(flag) and not arg.startswith("--"):
+            return True  # attached value or suffix: -i.bak, -ofile
+    return False
+
+
+def segment_risk(words: list, wildcard: bool = False) -> tuple:
+    """Risk of one simple command. With wildcard=True, rate the worst command the prefix permits."""
     if not words:
         return LOW, "empty"
     prog = words[0].rsplit("/", 1)[-1]
@@ -364,14 +423,11 @@ def segment_risk(words: list) -> tuple:
         if any(a in ("-c", "-e", "--eval", "-E") for a in args):
             return HIGH, "%s with inline code runs arbitrary code" % prog
         return HIGH, "%s runs arbitrary code" % prog
-    if prog == "find":
-        if any(a in ("-exec", "-execdir", "-delete", "-ok", "-okdir", "-fprint") for a in args):
-            return HIGH, "find with -exec or -delete"
-        return LOW, "find without -exec"
-    if prog == "sed":
-        if any(a == "-i" or a.startswith("-i") or a == "--in-place" for a in args):
-            return MEDIUM, "sed -i edits files"
-        return LOW, "sed without -i"
+    if prog in _FLAG_RISK:
+        flags, level, why = _FLAG_RISK[prog]
+        if wildcard or any(_has_flag(a, flags) for a in args):
+            return level, why
+        return LOW, "%s without %s" % (prog, flags[0])
     if prog in _READ_ONLY:
         return LOW, "%s is read-only" % prog
     if prog in _CHECK_PROGRAMS:
@@ -381,6 +437,12 @@ def segment_risk(words: list) -> tuple:
             return HIGH, "git -c can set config that runs commands"
         args = _drop_option_values(args, ("-C", "--git-dir", "--work-tree", "--namespace"))
     sub = next((a for a in args if not a.startswith("-")), "")
+    if prog in _SUBCOMMAND_TOOLS and prog not in ("gh", "make") and not sub:
+        if wildcard:
+            # `git *`, `git --no-pager *`, `/usr/bin/git *`: no subcommand means every subcommand.
+            return HIGH, "%s with any subcommand" % prog
+        if args and all(a in ("--version", "-v", "-V", "--help", "-h") for a in args):
+            return LOW, "%s version or help" % prog
     if prog == "git":
         table = _SUBCOMMAND_RISK["git"]
     elif prog == "gh":
@@ -412,17 +474,6 @@ def segment_risk(words: list) -> tuple:
         if sub in table[level]:
             return level, "%s %s" % (prog, sub)
     return MEDIUM, "%s %s is not in the known-subcommand table" % (prog, sub or "(no subcommand)")
-
-
-def bash_risk(command: str) -> tuple:
-    scan = _scan(command or "")
-    if scan["subst"]:
-        return HIGH, "command substitution can run anything"
-    risks = [segment_risk(_words(seg)) for seg in scan["segments"]] or [(LOW, "empty")]
-    level, reason = _max_risk(*risks)
-    if scan["redirect"] and level == LOW:
-        return MEDIUM, "redirection can write files"
-    return level, reason
 
 
 # ---------------------------------------------------------------- permission rules
@@ -471,11 +522,11 @@ def rule_risk(rule: str) -> tuple:
         scan = _scan(command)
         if scan["compound"] or scan["subst"] or scan["redirect"]:
             return HIGH, "rule contains shell operators"
+        wildcard = content.strip().endswith("*")
         words = _words(command)
-        level, reason = segment_risk(words)
-        prog = words[0] if words else ""
-        if prog in _SUBCOMMAND_TOOLS and len(words) < 2 and level != HIGH:
-            return HIGH, "%s with any subcommand" % prog
+        level, reason = segment_risk(words, wildcard=wildcard)
+        if wildcard and words and words[0].rsplit("/", 1)[-1] == "make" and len(words) < 2:
+            return HIGH, "make with any target"
         return level, reason
     if tool in ("Read", "Glob", "Grep", "LS", "NotebookRead"):
         if content and is_secret_path(content):

@@ -9,6 +9,7 @@ StopFailure and SessionEnd. It must never slow down or alter a session, so it:
 * always exits 0, logging its own failures to ~/.observer/logs/hook-errors.log.
 """
 import datetime
+import hashlib
 import json
 import os
 import sys
@@ -40,6 +41,23 @@ def _home():
     return os.path.expanduser(os.environ.get("OBSERVER_HOME", "~/.observer"))
 
 
+def _input_key(tool_name, tool_input):
+    """Must stay identical to observer.classify.input_key (a test enforces it). Computed here, before
+    clipping, so long inputs still join to their transcript tool call."""
+    tool_input = tool_input if isinstance(tool_input, dict) else {}
+    if tool_name == "Bash":
+        basis = str(tool_input.get("command", "")).strip()
+    elif "file_path" in tool_input:
+        basis = str(tool_input.get("file_path"))
+    elif "notebook_path" in tool_input:
+        basis = str(tool_input.get("notebook_path"))
+    elif "url" in tool_input:
+        basis = str(tool_input.get("url"))
+    else:
+        basis = json.dumps(tool_input, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha1(("%s\x00%s" % (tool_name, basis)).encode("utf-8")).hexdigest()[:16]
+
+
 def _clip(value):
     """Bound the size of every string inside the payload."""
     if isinstance(value, str):
@@ -58,6 +76,8 @@ def main():
     payload = json.loads(sys.stdin.read(MAX_STDIN) or "{}")
     now = datetime.datetime.now(datetime.timezone.utc)
     record = {"ts": now.isoformat(timespec="milliseconds").replace("+00:00", "Z")}
+    if payload.get("tool_name"):
+        record["input_key"] = _input_key(payload["tool_name"], payload.get("tool_input"))
     for key in KEEP:
         if key in payload:
             record[key] = _clip(payload[key])

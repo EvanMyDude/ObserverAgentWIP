@@ -92,10 +92,6 @@ class Rec:
     def id(self) -> str:
         return "r" + hashlib.sha1(("%s|%s" % (self.type, self.target)).encode("utf-8")).hexdigest()[:8]
 
-    @property
-    def score(self) -> float:
-        return self.impact_minutes_week * self.confidence / RISK_WEIGHT.get(self.risk or "medium", 2.0)
-
     def attach_evidence(self, clusters: list, window_days: int) -> None:
         ids, sessions, projects, examples = [], set(), set(), []
         cost, first, last = 0.0, "", ""
@@ -117,6 +113,12 @@ class Rec:
             "examples": [{"id": e[0], "ts": e[1], "detail": e[2]} for e in examples[:3]],
             "clusters": self.clusters,
         }
+
+
+def rank_score(row) -> float:
+    """Estimated minutes saved per week, discounted by confidence and risk. One ranking for every view."""
+    risk = row["risk"] or "medium"
+    return (row["impact_minutes_week"] or 0) * (row["confidence"] or 0) / RISK_WEIGHT.get(risk, RISK_WEIGHT["high"])
 
 
 def _cid(kind, subkind, fingerprint) -> str:
@@ -186,11 +188,12 @@ def _project_label(projects) -> str:
 
 
 class Recommender:
-    def __init__(self, conn: sqlite3.Connection, cfg: Config, now: datetime.datetime, clusters: dict):
+    def __init__(self, conn: sqlite3.Connection, cfg: Config, now: datetime.datetime, clusters: dict, scorecard_rows: list):
         self.conn = conn
         self.cfg = cfg
         self.now = now
         self.clusters = clusters
+        self.scorecard_rows = scorecard_rows
         self.recs = []
 
     def by_kind(self, kind: str) -> list:
@@ -408,7 +411,7 @@ class Recommender:
             ), [c])
 
     def underperforming_agents(self) -> None:
-        for row in scorecard(self.conn, self.cfg, self.now):
+        for row in self.scorecard_rows:
             if not row["underperforming"]:
                 continue
             clusters = [c for c in self.clusters.values() if row["agent"] in c.agents and c.kind in AGENT_FAULT_KINDS]
@@ -475,5 +478,5 @@ def scorecard(conn: sqlite3.Connection, cfg: Config, now: datetime.datetime) -> 
     return rows
 
 
-def candidates(conn: sqlite3.Connection, cfg: Config, now: datetime.datetime, clusters: dict) -> list:
-    return Recommender(conn, cfg, now, clusters).run()
+def candidates(conn: sqlite3.Connection, cfg: Config, now: datetime.datetime, clusters: dict, scorecard_rows: list) -> list:
+    return Recommender(conn, cfg, now, clusters, scorecard_rows).run()

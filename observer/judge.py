@@ -13,7 +13,7 @@ import subprocess
 from collections import Counter
 
 from .config import Config
-from .recommend import Rec, claude_md_target, settings_target
+from .recommend import BREW_FORMULA, Rec, claude_md_target, settings_target
 from .redact import excerpt
 
 CAUSES = ["capability_gap", "permission_friction", "context_gap", "model_error", "environment", "spec_ambiguity",
@@ -212,8 +212,16 @@ def _judge_rec(item: dict, clusters_by_id: dict, cfg: Config):
         target = "%s::%s" % (file, path)
     elif rtype == "install_tool":
         command = str(item.get("command") or "").strip()
-        program = command.split()[-1] if command else ""
-        patch, target = {"kind": "command", "command": command, "program": program}, program or _short_hash(command)
+        # Verification needs the program, which can differ from the formula (ripgrep installs rg), so match
+        # the formula against the cited missing programs before falling back to the formula itself.
+        match = re.match(r"^(?:brew install|install) ([A-Za-z0-9@+._/-]+)", command)
+        formula = match.group(1) if match else ""
+        missing = [c.fingerprint[len("missing:"):] for c in cited if c.fingerprint.startswith("missing:")]
+        program = next((p for p in missing if formula in (p, BREW_FORMULA.get(p))), "")
+        if not program:
+            program = missing[0] if len(missing) == 1 else formula.rsplit("/", 1)[-1]
+        patch = {"kind": "command", "command": command, "program": program}
+        target = program or "judge:%s" % _short_hash(command)
     else:
         patch = {"kind": "manual", "steps": text or rationale, "file": target_file}
         target = "judge:%s:%s" % (rtype, _short_hash(title + text))
