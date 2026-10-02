@@ -145,7 +145,7 @@ The observer reads untrusted text (web pages, tool output) and its job is to pro
 1. The judge has no tools and no session persistence, so injected instructions have nothing to act with.
 2. Excerpts are redacted for secrets, truncated, and fenced as data; the prompt says to treat them as evidence only.
 3. Output is constrained by a JSON schema with a closed set of recommendation types.
-4. **A deterministic policy gate runs after the judge and decides.** It blocks wildcard and interpreter rules, network and remote commands (`curl`, `ssh`, `git push`, and similar), destructive commands, secret paths, broad directories, settings keys other than `permissions.allow`, `permissions.deny`, `permissions.ask`, and `permissions.additionalDirectories`, any change to permission modes or hooks, install commands outside a short template list, and CLAUDE.md text that talks about bypassing permissions or ignoring instructions.
+4. **A deterministic policy gate runs on every recommendation after the judge and decides**, including candidates the judge revised. It rates an allow rule by the worst command its wildcard permits, so `Bash(git --no-pager *)` counts as any git subcommand and `Bash(rg *)` counts as `rg --pre`, which runs commands. It blocks wildcard and interpreter rules, network and remote commands (`curl`, `ssh`, `git push`, and similar), destructive commands, secret paths, broad directories, settings keys other than `permissions.allow`, `permissions.deny`, `permissions.ask`, and `permissions.additionalDirectories`, any change to permission modes or hooks, install commands outside a short template list, and CLAUDE.md text that talks about bypassing permissions or ignoring instructions.
 5. Every recommendation must cite evidence IDs that exist in the database; numbers in the report come from the database, never from the model.
 6. Nothing is applied automatically. You apply; the observer detects that you did and measures the effect.
 
@@ -156,7 +156,7 @@ Blocked items are listed in the report with the reason, so you can see what was 
 Each recommendation has a stable ID derived from its type and target, so it accumulates evidence across days instead of reappearing as new. States: `open`, `applied`, `verified`, `not_effective`, `dismissed`, `blocked`.
 
 - Applied is detected automatically where possible: the rule is present in a settings file, the CLI is on `PATH`, the CLAUDE.md contains the line. Otherwise `observer done <id>`.
-- Seven days after applying, the observer compares the friction rate for the targeted fingerprint against the 14 days before. A drop of 50% or more marks it verified and it appears under Wins; otherwise it is flagged as not effective.
+- Seven days after applying, the observer compares the friction rate for the targeted fingerprint against the 14 days before. A drop of 50% or more marks it verified; otherwise it is flagged as not effective. Both appear under Applied changes.
 - `observer dismiss <id>` suppresses an item until its evidence doubles.
 
 ### 4.7 Report
@@ -166,9 +166,10 @@ Each recommendation has a stable ID derived from its type and target, so it accu
 1. **Do today**: at most five items ranked by estimated minutes saved per week times confidence, divided by a risk weight. Each item states the evidence, the exact change, how to verify it, and how to dismiss it.
 2. **Consider**: items that need your judgment.
 3. **Blocked by policy**: what was considered and why it was refused.
-4. **Wins**: applied items and their measured effect.
+4. **Applied changes**: what you applied and its measured effect.
 5. **Agent scorecard**: per project, skill, and subagent type.
-6. **Pipeline health**: files, records, parse failures, hook status, judge status.
+6. **Friction seen**: events, sessions, and estimated minutes by kind, plus the judge's cause attribution.
+7. **Pipeline health**: files, records, parse failures, hook status, judge status.
 
 ### 4.8 Scheduling
 
@@ -202,6 +203,7 @@ Everything stays on the machine under `~/.observer` (`observer.db`, spool, repor
 - An end-to-end test running the full pipeline against fixture transcripts and a fake `claude` binary.
 - A smoke run against real transcripts, including one real judge call.
 - The suite passes on Python 3.9 (the macOS system version) and 3.11.
+- Two independent code-review passes found 13 defects, including two ways around the policy gate; all are fixed and each has a regression test.
 
 ## 7. Open assumptions
 
