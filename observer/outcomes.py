@@ -15,11 +15,19 @@ from .store import dumps, loads
 
 
 
-def expire_unseen(conn: sqlite3.Connection, now_iso: str) -> int:
-    """Open or blocked recommendations this run did not regenerate no longer have qualifying evidence."""
+JUDGE_GRACE_DAYS = 7
+
+
+def expire_unseen(conn: sqlite3.Connection, now: datetime.datetime) -> int:
+    """Expire open or blocked recommendations whose evidence no longer qualifies.
+
+    Rule-based items are regenerated deterministically, so missing one run means the evidence aged out. The
+    judge is not deterministic and may simply not repeat a suggestion, so its items stay for a grace period."""
+    grace = iso(now - datetime.timedelta(days=JUDGE_GRACE_DAYS))
     cur = conn.execute(
         "UPDATE recommendations SET status='expired', status_reason='evidence no longer meets the thresholds' "
-        "WHERE status IN ('open', 'blocked') AND last_seen < ?", (now_iso,)
+        "WHERE status IN ('open', 'blocked') AND last_seen < ? AND (source != 'judge' OR last_seen < ?)",
+        (iso(now), grace),
     )
     conn.commit()
     return cur.rowcount
@@ -122,6 +130,19 @@ def _rate_per_day(conn, fingerprints: list, start: str, end: str) -> float:
     return total / days
 
 
+def _sessions_since(conn, projects: list, since: str) -> int:
+    placeholders = ",".join("?" * len(projects))
+    return conn.execute(
+        "SELECT COUNT(*) FROM sessions WHERE internal=0 AND first_ts >= ? AND cwd IN (%s)" % placeholders,
+        [since] + projects,
+    ).fetchone()[0]
+
+
+def _label(projects: list) -> str:
+    names = sorted(os.path.basename(p.rstrip("/")) or p for p in projects)
+    return names[0] if len(names) == 1 else "%s and %d other projects" % (names[0], len(names) - 1)
+
+
 def mark_applied(conn, rec_id: str, now: datetime.datetime, cfg: Config) -> None:
     row = conn.execute("SELECT fingerprints_json FROM recommendations WHERE id=?", (rec_id,)).fetchone()
     fps = [tuple(x) for x in loads(row["fingerprints_json"], [])] if row else []
@@ -142,6 +163,12 @@ def update_outcomes(conn: sqlite3.Connection, cfg: Config, now: datetime.datetim
         if not applied_at or parse_ts(applied_at) > now - datetime.timedelta(days=cfg.verify_after_days):
             continue
         fps = [tuple(x) for x in loads(row["fingerprints_json"], [])]
+        projects = [p for p in (loads(row["evidence_json"], {}) or {}).get("projects", []) if p and p != "(unknown)"]
+        if projects and not _sessions_since(conn, projects, applied_at):
+            # No work in the affected project yet: an absence of errors would prove nothing.
+            conn.execute("UPDATE recommendations SET status_reason=? WHERE id=?",
+                         ("waiting: no sessions in %s since it was applied" % _label(projects), row["id"]))
+            continue
         after = _rate_per_day(conn, fps, applied_at, iso(now))
         baseline = row["baseline_per_day"] or 0.0
         if baseline <= 0 and after == 0:

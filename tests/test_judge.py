@@ -1,3 +1,4 @@
+import datetime
 import json
 import os
 import tempfile
@@ -129,6 +130,22 @@ class JudgeIntegrationTest(unittest.TestCase):
         do_today = report.split("## Do today")[1].split("## ")[0]
         self.assertNotIn("git push", do_today)  # demoted by the judge, shown under Consider instead
         self.assertIn("Judge would drop this", report)
+
+    def test_judge_suggestions_survive_a_run_that_does_not_repeat_them(self):
+        pipeline.run(self.cfg, use_judge=False, now=fixtures.NOW)
+        cluster = _cid("tool_error", "command_not_found", "missing:frobctl")
+        response = {"summary": "s", "attributions": [], "candidate_feedback": [], "new_recommendations": [
+            {"type": "add_context", "title": "Explain frobctl", "rationale": "r", "cluster_ids": [cluster],
+             "text": "- frobctl is not installed; read package.json with python3 -m json.tool."}]}
+        self.cfg.claude_bin = str(fixtures.write_fake_claude(self.tmp / "claude", response, self.tmp / "log.json"))
+        pipeline.run(self.cfg, use_judge=True, now=fixtures.NOW)
+        # The next morning the judge does not repeat it; the suggestion stays visible.
+        result = pipeline.run(self.cfg, use_judge=False, now=fixtures.NOW + datetime.timedelta(days=1))
+        self.assertEqual(self.rec_by("add_context", "Explain frobctl")["status"], "open")
+        self.assertIn("Explain frobctl", Path(result["report"]).read_text())
+        self.assertIn("Suggested by the LLM review", Path(result["report"]).read_text())
+        pipeline.run(self.cfg, use_judge=False, now=fixtures.NOW + datetime.timedelta(days=8))
+        self.assertEqual(self.rec_by("add_context", "Explain frobctl")["status"], "expired")
 
     def test_judge_failure_degrades_to_rules(self):
         self.cfg.claude_bin = str(self.tmp / "missing-claude")

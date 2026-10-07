@@ -14,6 +14,24 @@ from .install import hooks_installed
 from .store import connect, dumps, loads
 
 
+def _totals(conn, now: datetime.datetime) -> dict:
+    week = iso(now - datetime.timedelta(days=7))
+    recent = Counter()
+    for r in conn.execute("SELECT COALESCE(surface, 'cli') s, COUNT(*) n FROM sessions WHERE internal=0 AND first_ts >= ? "
+                          "GROUP BY 1", (week,)):
+        recent[r["s"]] = r["n"]
+    # A session that fired hooks but has no transcript means a transcript location the observer does not read.
+    unmatched = conn.execute(
+        "SELECT COUNT(DISTINCT h.session_id) FROM hook_events h LEFT JOIN sessions s USING(session_id) "
+        "WHERE h.ts >= ? AND h.session_id IS NOT NULL AND s.session_id IS NULL", (week,)
+    ).fetchone()[0]
+    return {
+        "sessions": conn.execute("SELECT COUNT(*) FROM sessions WHERE internal=0").fetchone()[0],
+        "tool_calls": conn.execute("SELECT COUNT(*) FROM tool_calls").fetchone()[0],
+        "recent_cli": recent["cli"], "recent_cowork": recent["cowork"], "unmatched_hook_sessions": unmatched,
+    }
+
+
 def prune(conn, cfg: Config, now: datetime.datetime) -> None:
     cutoff = iso(now - datetime.timedelta(days=cfg.retention_days))
     for table in ("tool_calls", "messages", "hook_events", "frictions", "requests"):
@@ -90,11 +108,10 @@ def run(cfg: Config, use_judge: bool = True, send_notification: bool = False, no
         policy.gate(rec)
     outcomes.upsert(conn, recs, now_iso)
     outcome_changes = outcomes.update_outcomes(conn, cfg, now)  # before expiry, so applied changes are caught
-    outcomes.expire_unseen(conn, now_iso)
+    outcomes.expire_unseen(conn, now)
 
-    seen_ids = [r.id for r in recs]
-    placeholders = ",".join("?" * len(seen_ids)) or "''"
-    rec_rows = conn.execute("SELECT * FROM recommendations WHERE id IN (%s)" % placeholders, seen_ids).fetchall()
+    # Everything still open after expiry is current, including judge items kept through their grace period.
+    rec_rows = conn.execute("SELECT * FROM recommendations WHERE status IN ('open', 'blocked')").fetchall()
     outcome_rows = conn.execute(
         "SELECT * FROM recommendations WHERE status IN ('applied', 'verified', 'not_effective') ORDER BY applied_at DESC LIMIT 20"
     ).fetchall()
@@ -114,9 +131,7 @@ def run(cfg: Config, use_judge: bool = True, send_notification: bool = False, no
         "friction_by_kind": report.friction_by_kind(conn, iso(now - datetime.timedelta(days=cfg.window_days))),
         "attribution_counts": judge.judge_counts(attributions),
         "health": report.health_lines(ingest_stats, spool_stats, hook_total, judge_status, ingestor.unknown_types,
-                                      hooks_installed(), notification_counts, {
-                                          "sessions": conn.execute("SELECT COUNT(*) FROM sessions WHERE internal=0").fetchone()[0],
-                                          "tool_calls": conn.execute("SELECT COUNT(*) FROM tool_calls").fetchone()[0]}),
+                                      hooks_installed(), notification_counts, _totals(conn, now)),
     }
     text = report.render(ctx, cfg)
     local_day = now.astimezone().strftime("%Y-%m-%d")

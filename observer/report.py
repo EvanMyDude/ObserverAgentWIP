@@ -56,6 +56,8 @@ def _rec_block(n: int, row, cfg) -> str:
     lines = [head, "", _indent(row["rationale"] or "")]
     if evidence.get("judge_note"):
         lines += ["", _indent("*%s*" % evidence["judge_note"])]
+    if row["source"] == "judge":
+        lines += ["", _indent("*Suggested by the LLM review; last proposed %s.*" % (row["last_seen"] or "")[:10])]
     lines += ["", _indent(render_patch(patch))]
     meta = "Evidence: %d events in %d sessions, last seen %s." % (
         evidence.get("count", 0), evidence.get("sessions", 0), (evidence.get("last") or "")[:10])
@@ -167,6 +169,11 @@ def health_lines(ingest_stats: Counter, spool_stats: Counter, hook_total: int, j
             ingest_stats.get("files_read", 0), ingest_stats.get("records", 0), ingest_stats.get("tool_calls", 0),
             ingest_stats.get("parse_errors", 0), totals.get("sessions", 0), totals.get("tool_calls", 0)),
     ]
+    lines.append("Sessions started in the last 7 days: %d Claude Code, %d Cowork." % (
+        totals.get("recent_cli", 0), totals.get("recent_cowork", 0)))
+    if totals.get("unmatched_hook_sessions"):
+        lines.append("%d sessions fired hooks this week but have no transcript the observer can find; they may be "
+                     "stored somewhere transcript_roots does not cover." % totals["unmatched_hook_sessions"])
     if unknown:
         lines.append("Record types the parser does not recognize (usually new metadata, and harmless while tool calls "
                      "keep being added): %s." % ", ".join("%s %d" % kv for kv in unknown.most_common(5)))

@@ -106,6 +106,16 @@ class PipelineTest(unittest.TestCase):
         allow = self.find("allow_permission", "Bash(git log:*)")
         self.assertEqual(allow["status"], "applied")
         self.assertGreater(allow["baseline_per_day"], 0)
+        # A week passes with no work in the affected projects: no errors, but nothing was tested either.
+        self.run_pipeline(days_later=8)
+        allow = self.find("allow_permission", "Bash(git log:*)")
+        self.assertEqual(allow["status"], "applied")
+        self.assertIn("waiting: no sessions in", allow["status_reason"])
+        # Work resumes in one of those projects and the friction does not come back.
+        later = fixtures.Session(Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects", self.data["alpha"], days_ago=-7)
+        later.prompt("continue the build work from yesterday")
+        later.tool("Bash", {"command": "ls"}, "a b")
+        later.write()
         self.run_pipeline(days_later=8)
         allow = self.find("allow_permission", "Bash(git log:*)")
         self.assertEqual(allow["status"], "verified")
@@ -144,6 +154,7 @@ class PipelineTest(unittest.TestCase):
         # A second run with no new activity reads nothing new but still reports the database totals.
         report = Path(self.run_pipeline()["report"]).read_text()
         self.assertIn("0 changed since the last run", report)
+        self.assertIn("Sessions started in the last 7 days:", report)
         self.assertRegex(report, r"Database: [1-9]\d* sessions, [1-9]\d* tool calls")
 
 
